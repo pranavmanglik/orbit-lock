@@ -1,17 +1,35 @@
-# Orbit Lock: security
+# Security
 
-## Package-specific security guidance
+## Coordination limits
 
-The README does not define separate package-specific security guarantees. Follow the implemented API and provider documentation; do not infer security properties that are not documented and tested.
+A lease is a time-bounded coordination signal. It is not a process identity, a durable mutex, or
+proof that a caller still owns a resource. Clock behavior, pauses, partitions, provider failover,
+and delayed responses can cause two clients to believe they may proceed. Use fencing tokens and
+make the protected storage atomically reject stale tokens. If the protected system cannot enforce
+fencing, do not rely on this lease to prevent stale writes.
 
-## Credentials and sensitive data
+The adapter must ensure each fencing token is strictly greater than every token previously issued
+for the same resource, including after restart and supported failover. Document the provider's
+counter durability and scope. Positive tokens alone are insufficient. Review Redis replication,
+restore, failover, and split-brain behavior in the specific adapter documentation.
 
-Use least-privilege credentials and a secret manager for provider secrets. Do not commit secrets, tokens, private keys, personal data, request bodies, raw provider errors, or opaque cursors. Enable TLS certificate verification for remote services unless package documentation gives a narrowly scoped local-development exception.
+## Sensitive values
 
-## Vulnerability disclosure
+Resource names and owner tokens are omitted from `LockLease` representations, and provider errors
+are replaced with generic messages unless already typed. This is not a guarantee against logging
+inside an adapter, instrumentation hooks, memory inspection, or tracing. Avoid placing personal or
+secret data in resource names, and never emit owner tokens or backend credentials in logs. Keep
+provider credentials in workload identity or a secret manager with least-privilege access.
 
-Follow the repository [security policy](../../SECURITY.md). Do not post vulnerability details in public issues. The policy describes private reporting alternatives without claiming that a hosting-platform setting is enabled.
+## Adapter requirements
 
-## Limits
+Provider implementations should acquire atomically, use an unguessable per-acquisition owner
+secret, compare that owner during renewal and release, use server-side expiry, and avoid exposing
+raw backend errors that contain endpoints or credentials. Use authenticated encrypted transport,
+verify TLS certificates, set bounded timeouts, and document topology-specific durability and
+failover behavior. Cancellation and ambiguous timeouts must not cause a caller to assume ownership.
 
-This page records source and package documentation, not an independent security audit. Validate the package, its provider SDKs, and its deployment configuration before production use.
+## Vulnerability reporting
+
+Report suspected vulnerabilities using the private process in the repository's
+[security policy](../../SECURITY.md). Avoid public exploit details while maintainers investigate.

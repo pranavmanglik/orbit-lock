@@ -34,7 +34,7 @@ appropriate for the work and make protected operations safe against retries.
 
 The capability package has no database, Redis dependency, local fake lock, or implicit polling
 loop. See `orbit-cache-redis[lock]` for the optional Redis adapter and its topology-specific limitations.
-This package is pre-alpha and its public API is not stable.
+This package is in alpha and its public API is not stable.
 
 ## Documentation
 

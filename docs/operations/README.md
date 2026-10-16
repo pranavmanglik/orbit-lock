@@ -1,53 +1,54 @@
-# Orbit Lock: operations and security
+# Operations
 
-This guide organizes runtime behavior documented by the package. It does not certify production readiness. Verify provider/client versions, permissions, transport security, limits, and failure behavior in the target environment before release.
+`orbit-lock` defines lease handles and a provider interface. It does not connect to a lock service,
+start renewal jobs, track active handles, or close an application provider automatically. The
+application owns those lifecycle decisions.
 
-## Configuration surface
+## Acquire and use a lease
 
-Environment names found in the package README:
-
-The package README does not name `ORBIT_*` variables. Use its typed constructors and application configuration, and confirm exact runtime inputs in the implementation before deployment.
-
-Use the package README's constructor and deployment examples. Store credentials in a secret manager and avoid logging credentials, raw provider errors, request data, or opaque cursors.
-
-## Lifecycle, failure behavior, and limits
-
-`orbit-lock` defines a provider-neutral asynchronous lease contract. Install a provider adapter
-separately to use leases:
-
-```bash
-python -m pip install orbit-lock
-```
-
-Providers expose `LockProvider.try_acquire(resource, ttl_ms=...)`. Acquisition is non-blocking and
-returns `None` when the lease is currently held. Every lease carries a strictly positive fencing
-token, can be renewed, and should be released with `release()` or an async context manager. Resource
-names are bounded and omitted from lease representations. TTLs are 100 ms to 24 hours; applications
-must choose values that account for pauses, network delay, and operation duration.
+`try_acquire(resource, ttl_ms=...)` is non-blocking: `None` means the provider reports a current
+holder. A returned `LockLease` includes a positive fencing token. Use a context manager for prompt
+release, and pass the fencing token to the system that performs the protected write:
 
 ```python
 lease = await provider.try_acquire("invoice:42", ttl_ms=30_000)
 if lease is None:
     return
 async with lease:
-    # Pass lease.fencing_token to protected storage and reject stale tokens there.
-    await update_invoice(fencing_token=lease.fencing_token)
+    await invoices.apply_if_fencing_token_is_newer(
+        invoice_id="42", fencing_token=lease.fencing_token
+    )
 ```
 
-Leases are time-limited coordination, not proof that a process still owns a resource. A paused
-client can resume after expiry. Protected storage must atomically reject stale fencing tokens for
-the lock to guard writes safely. Lease renewal does not happen automatically; callers must schedule
-it and stop protected work when renewal raises `LeaseLostError`. Cancellation propagates from
-provider calls. Applications own provider shutdown and should release active leases before closing
-the provider.
-If cancellation or a transport failure interrupts acquisition after the backend commits it, the
-caller may not receive the lease handle; the backend TTL bounds that orphaned lease. Keep TTLs
-appropriate for the work and make protected operations safe against retries.
+The destination must atomically remember and reject tokens older than the latest accepted token
+for that resource. Without that destination-side check, a process paused past lease expiry can wake
+up and perform a stale write. A lock alone cannot prevent this. The adapter must issue tokens that
+increase monotonically for each resource across all owners and survive the failure modes of its
+backend; a merely positive random token does not provide fencing.
 
-The capability package has no database, Redis dependency, local fake lock, or implicit polling
-loop. See `orbit-cache-redis[lock]` for the optional Redis adapter and its topology-specific limitations.
-This package is pre-alpha and its public API is not stable.
+## Renewal and failure handling
 
-## Production validation
+The lease does not renew itself. If work may outlast its TTL, the caller must schedule renewals and
+coordinate them with cancellation and work completion. Stop protected work immediately when
+`renew()` raises `LeaseLostError`. A provider exception becomes a sanitized `LockOperationError`
+unless the provider already raised a typed lock error; cancellation propagates to the caller. Do
+not treat a renewal network timeout as proof the lease is still held.
 
-Validate startup/shutdown cleanup, timeout and cancellation behavior, concurrency and payload bounds where applicable, secret rotation and least-privilege access, data durability, backup/restore, and failover against the selected provider. Do not infer distributed or durable guarantees from an in-process API or fake-client tests.
+TTL values are integers from 100 through 86,400,000 milliseconds. Choose a TTL with margin for
+runtime pauses, scheduling delay, and provider latency. Keep protected operations idempotent or
+fencing-safe because a lost response can make acquisition or release outcome ambiguous. If
+acquisition commits remotely but its response is cancelled or lost, no handle is available to
+release; backend expiry bounds that orphaned lease.
+
+## Shutdown and deployment
+
+Stop new work first, cancel and await work tasks, release held leases, then close the provider
+through its documented `aclose()` method. The capability has no active-lease registry, so it cannot
+enforce this order. A failed release is surfaced and may leave the lease until expiry. Configure
+provider timeouts and application shutdown deadlines so cleanup cannot hang indefinitely.
+
+The Redis implementation is provided by `orbit-cache-redis[lock]`; consult that adapter's guide
+for its Redis topology, durability, and failover limitations. This package itself has no Redis
+dependency or local lock implementation. Validate failover, partitions, expiry behavior, fencing
+monotonicity, cancellation, and concurrent acquisition against a dedicated service before rollout.
+Unit tests with an in-memory fake do not establish distributed correctness.
